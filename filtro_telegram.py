@@ -2,8 +2,18 @@
 filtro_telegram.py
 ------------------
 Lê mensagens novas do grupo público do Telegram @cartoesmilhaseviagens,
-filtra por palavras-chave de milhas aéreas e reencaminha as relevantes
-para o seu chat pessoal via bot.
+filtra por dois critérios e reencaminha as relevantes para o seu chat via bot.
+
+CRITÉRIO 1 — Bônus de transferência
+  A mensagem precisa mencionar:
+  · uma FONTE (Itaú, BRB/Curtaí ou Livelo)
+  · um PROGRAMA DE DESTINO (Latam Pass ou internacionais)
+  · pelo menos um INDICADOR de bônus/transferência
+
+CRITÉRIO 2 — Compra de milhas/pontos
+  A mensagem precisa mencionar:
+  · qualquer programa de interesse (fonte ou destino)
+  · pelo menos um INDICADOR de compra/venda
 
 Rodado pelo GitHub Actions a cada 15 minutos.
 """
@@ -31,30 +41,30 @@ CHAT_ID   = os.environ["MEU_CHAT_ID"]
 
 GRUPO = "cartoesmilhaseviagens"
 
-# ─── Arquivo de estado (preservado entre execuções via cache do Actions) ──────
+# ─── Arquivo de estado ────────────────────────────────────────────────────────
 
 STATE_FILE = "state.json"
 
-# ─── Palavras-chave principais (basta UMA estar presente) ─────────────────────
-# A comparação ignora maiúsculas/minúsculas e acentos.
+# ─── CRITÉRIO 1: Bônus de transferência ──────────────────────────────────────
 
-KEYWORDS = [
-    # Programas nacionais
+# Bancos/programas de origem que você acompanha
+FONTES = [
     "livelo",
-    "itau",        # captura "itaú" após normalização
+    "itau",       # captura "itaú"
     "brb",
-    "curtai",      # captura "curtaí"
-    "dux",
+    "curtai",     # captura "curtaí" (programa BRB)
+]
 
-    # Latam
+# Programas de destino que você quer receber
+PROGRAMAS_DESTINO = [
+    # Nacional
     "latam",
     "latam pass",
-
     # Internacionais
     "american airlines",
     "aadvantage",
     "tap",
-    "miles go",    # captura "miles&go" — o & some na normalização
+    "miles go",       # captura "miles&go"
     "united",
     "mileageplus",
     "mileage plus",
@@ -74,47 +84,80 @@ KEYWORDS = [
     "life miles",
 ]
 
-# ─── Palavras-chave de bônus/promoção (filtro adicional opcional) ─────────────
-# Se EXIGIR_BONUS=true, a mensagem precisa ter keyword principal E bônus.
-
-BONUS_KEYWORDS = [
-    "%",
-    "bonus",       # captura "bônus"
-    "transferencia",
-    "oferta",
-    "promocao",    # captura "promoção"
-    "desconto",
-    "pontos",
-    "milhas",
+# Palavras que indicam que é um bônus ou transferência
+INDICADORES_BONUS = [
+    "bonus",           # captura "bônus"
+    "transferencia",   # captura "transferência"
+    "bonus de transferencia",
+    "transferencia com bonus",
 ]
 
-# Leia do ambiente; padrão = False (filtro amplo)
-EXIGIR_BONUS = os.environ.get("EXIGIR_BONUS", "false").strip().lower() == "true"
+# ─── CRITÉRIO 2: Compra de milhas/pontos ─────────────────────────────────────
+
+# Todos os programas relevantes (fontes + destinos) — para check de compra
+TODOS_PROGRAMAS = FONTES + PROGRAMAS_DESTINO
+
+# Palavras que indicam compra/venda de pontos ou milhas
+INDICADORES_COMPRA = [
+    "compra de milhas",
+    "compra de pontos",
+    "comprar milhas",
+    "comprar pontos",
+    "milhas a venda",
+    "venda de milhas",
+    "compra milhas",
+    "compra pontos",
+    "milhas por ",    # ex: "milhas por R$"
+    "pontos por ",    # ex: "pontos por R$"
+    "preco por milha",
+    "preco por ponto",
+]
 
 # ─── Utilidades ───────────────────────────────────────────────────────────────
 
 def normalizar(texto: str) -> str:
-    """Remove acentos e converte para minúsculas para comparação uniforme."""
+    """Remove acentos, converte para minúsculas e normaliza espaços."""
     sem_acento = (
         unicodedata.normalize("NFD", texto)
         .encode("ascii", "ignore")
         .decode("ascii")
     )
-    # Substitui & por espaço para capturar "miles&go" como "miles go"
     sem_acento = sem_acento.replace("&", " ")
-    # Colapsa múltiplos espaços
     sem_acento = re.sub(r"\s+", " ", sem_acento)
     return sem_acento.lower()
 
 
 def contem_alguma(texto_norm: str, keywords: list[str]) -> bool:
-    """Verifica se o texto contém pelo menos uma das keywords (já normalizadas)."""
+    """Retorna True se o texto contém pelo menos uma das keywords."""
     for kw in keywords:
         kw_norm = normalizar(kw)
-        padrao = r"(?<![a-z0-9])" + re.escape(kw_norm) + r"(?![a-z0-9])"
+        padrao = r"(?<![a-z0-9])" + re.escape(kw_norm.strip()) + r"(?![a-z0-9])"
         if re.search(padrao, texto_norm):
             return True
     return False
+
+
+def classificar_mensagem(texto_norm: str) -> str | None:
+    """
+    Retorna o tipo de alerta se a mensagem for relevante, ou None.
+    Tipos: 'bonus_transferencia' | 'compra_pontos'
+    """
+    # Critério 1: bônus de transferência
+    tem_fonte   = contem_alguma(texto_norm, FONTES)
+    tem_destino = contem_alguma(texto_norm, PROGRAMAS_DESTINO)
+    tem_bonus   = contem_alguma(texto_norm, INDICADORES_BONUS)
+
+    if tem_fonte and tem_destino and tem_bonus:
+        return "bonus_transferencia"
+
+    # Critério 2: compra de pontos/milhas
+    tem_programa = contem_alguma(texto_norm, TODOS_PROGRAMAS)
+    tem_compra   = contem_alguma(texto_norm, INDICADORES_COMPRA)
+
+    if tem_programa and tem_compra:
+        return "compra_pontos"
+
+    return None
 
 
 def carregar_estado() -> dict:
@@ -147,6 +190,16 @@ def enviar_mensagem_bot(texto: str) -> None:
 
 # ─── Lógica principal ─────────────────────────────────────────────────────────
 
+EMOJI_TIPO = {
+    "bonus_transferencia": "🔁",
+    "compra_pontos": "🛒",
+}
+
+LABEL_TIPO = {
+    "bonus_transferencia": "Bônus de Transferência",
+    "compra_pontos": "Compra de Pontos",
+}
+
 async def main() -> None:
     estado = carregar_estado()
     primeira_execucao = estado["last_message_id"] is None
@@ -161,8 +214,7 @@ async def main() -> None:
                 salvar_estado(estado)
                 print(
                     f"[INIT] Primeira execução concluída. "
-                    f"Ponto de partida: mensagem ID {msgs[0].id}. "
-                    f"A partir da próxima execução, mensagens novas serão filtradas."
+                    f"Ponto de partida: mensagem ID {msgs[0].id}."
                 )
             else:
                 print("[INIT] Grupo sem mensagens — nada a fazer.")
@@ -188,23 +240,26 @@ async def main() -> None:
                 continue
 
             texto_norm = normalizar(texto)
+            tipo = classificar_mensagem(texto_norm)
 
-            tem_keyword = contem_alguma(texto_norm, KEYWORDS)
-            tem_bonus   = contem_alguma(texto_norm, BONUS_KEYWORDS) if EXIGIR_BONUS else True
-
-            if tem_keyword and tem_bonus:
+            if tipo:
                 data_hora = msg.date.strftime("%d/%m/%Y %H:%M")
+                emoji = EMOJI_TIPO[tipo]
+                label = LABEL_TIPO[tipo]
                 cabecalho = (
-                    f"✈️ <b>Milhas Alert</b> | {data_hora}\n"
+                    f"{emoji} <b>{label}</b> | {data_hora}\n"
                     f"📌 <i>@{GRUPO}</i>\n"
                     f"{'─' * 30}\n\n"
                 )
                 try:
                     enviar_mensagem_bot(cabecalho + texto)
                     enviadas += 1
+                    print(f"[ENVIADA] ID {msg.id} — tipo: {tipo}")
                     time.sleep(0.5)
                 except Exception as e:
                     print(f"[ERRO] Falha ao enviar mensagem ID {msg.id}: {e}")
+            else:
+                print(f"[IGNORADA] ID {msg.id} — não atende aos critérios")
 
         estado["last_message_id"] = msgs[-1].id
         salvar_estado(estado)
